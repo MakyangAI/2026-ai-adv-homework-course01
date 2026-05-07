@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+const db = require('../database');
+const { queryTradeInfo } = require('../ecpay');
 
 // Helper to render with front layout
 function renderFront(res, page, locals = {}) {
@@ -70,6 +72,35 @@ router.get('/admin/orders', function (req, res) {
     pageScript: 'admin-orders',
     currentPath: '/admin/orders'
   });
+});
+
+// ECPay OrderResultURL — 消費者付款後，綠界將瀏覽器 Form POST 導回此端點
+// 本地端無法接收綠界 Server-to-Server ReturnURL，改由此處主動呼叫 QueryTradeInfo 驗證
+router.post('/ecpay/result', async (req, res) => {
+  const orderId = req.body.CustomField1;
+  const merchantTradeNo = req.body.MerchantTradeNo;
+
+  if (!orderId || !merchantTradeNo) {
+    return res.redirect('/');
+  }
+
+  try {
+    const tradeInfo = await queryTradeInfo(merchantTradeNo);
+    const isPaid = tradeInfo.TradeStatus === '1';
+    const newStatus = isPaid ? 'paid' : 'failed';
+
+    db.prepare('UPDATE orders SET status = ? WHERE id = ? AND status = ?').run(newStatus, orderId, 'pending');
+
+    res.redirect(`/orders/${orderId}?payment=${isPaid ? 'success' : 'failed'}`);
+  } catch (err) {
+    console.error('[ECPay] QueryTradeInfo 失敗:', err.message);
+    res.redirect(`/orders/${orderId}?payment=failed`);
+  }
+});
+
+// ECPay ReturnURL dummy — 本地端收不到此 Server-to-Server 呼叫，但端點必須存在
+router.post('/ecpay/notify', (req, res) => {
+  res.type('text').status(200).send('1|OK');
 });
 
 module.exports = router;

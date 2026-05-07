@@ -2,6 +2,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../database');
 const authMiddleware = require('../middleware/authMiddleware');
+const { buildFormParams, IS_STAGING } = require('../ecpay');
 
 const router = express.Router();
 
@@ -413,6 +414,53 @@ router.patch('/:id/pay', (req, res) => {
     error: null,
     message: action === 'success' ? '付款成功' : '付款失敗'
   });
+});
+
+/**
+ * @openapi
+ * /api/orders/{id}/ecpay-form:
+ *   post:
+ *     summary: 產生綠界 AIO 金流表單參數
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: 成功，回傳 ECPay 表單 action URL 與參數
+ *       400:
+ *         description: 訂單狀態不是 pending
+ *       404:
+ *         description: 訂單不存在
+ */
+router.post('/:id/ecpay-form', (req, res) => {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ? AND user_id = ?').get(req.params.id, req.user.userId);
+
+  if (!order) {
+    return res.status(404).json({ data: null, error: 'NOT_FOUND', message: '訂單不存在' });
+  }
+
+  if (order.status !== 'pending') {
+    return res.status(400).json({
+      data: null,
+      error: 'INVALID_STATUS',
+      message: '訂單狀態不是 pending，無法付款'
+    });
+  }
+
+  const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
+  const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+  const params = buildFormParams(order, items, baseUrl);
+  const action = IS_STAGING
+    ? 'https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5'
+    : 'https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5';
+
+  res.json({ data: { action, params }, error: null, message: '' });
 });
 
 module.exports = router;
