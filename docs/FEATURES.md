@@ -10,6 +10,7 @@
 | 訂單建立（購物車轉訂單） | 完成 |
 | 訂單查詢（個人） | 完成 |
 | 模擬付款（success / fail） | 完成 |
+| 綠界 ECPay AIO 金流串接 | 完成 |
 | 後台商品管理（CRUD） | 完成 |
 | 後台訂單管理（列表/詳情） | 完成 |
 | OpenAPI 文件產生 | 完成 |
@@ -291,6 +292,108 @@ pending ──[action=success]──▶ paid
 | 403 | FORBIDDEN | 已登入但非 admin |
 | 404 | NOT_FOUND | 商品不存在（編輯/刪除） |
 | 409 | CONFLICT | 商品有 pending 訂單（刪除時） |
+
+---
+
+## 綠界 ECPay AIO 金流串接
+
+### 行為描述
+
+整合綠界科技 AIO（All-In-One）金流，讓使用者在付款時跳轉至綠界付款頁面，完成付款後由綠界回調本站更新訂單狀態。
+
+**付款流程**：
+1. 前端呼叫 `POST /api/orders/:id/ecpay-form`，取得 AIO Checkout 的表單 `action` URL 與所有參數（含 CheckMacValue）
+2. 前端動態建立 HTML form 並 POST 至綠界 AIO Checkout
+3. 使用者在綠界付款頁面完成付款（信用卡、ATM、超商代碼、WebATM 等）
+4. 付款完成後，綠界將瀏覽器 Form POST 導回本站 `OrderResultURL`（`/ecpay/result`）
+5. 本站主動呼叫綠界 `QueryTradeInfo/V5` API 驗證交易狀態（避免依賴可偽造的前端參數）
+6. 依據 `TradeStatus === '1'` 更新訂單狀態為 `paid` 或 `failed`，並重新導向訂單詳情頁
+
+**Server-to-Server ReturnURL**：`POST /ecpay/notify` 端點固定回應 `1|OK`；本地開發環境無法接收綠界主動呼叫，故不作為主要驗證依據。
+
+**CheckMacValue 產生**：
+- 參數依 key 字典序排序（case-insensitive）
+- 串接格式：`HashKey={key}&{params}&HashIV={iv}`
+- 套用 ECPay 專用 URL Encode（`+` 代替 `%20`，部分符號轉義不同於標準 RFC 3986）
+- SHA-256 雜湊後轉大寫
+
+**環境切換**：透過環境變數 `ECPAY_ENV=production` 切換正式環境，預設為 staging（測試）環境。
+
+### 核心模組
+
+`src/ecpay.js` 提供以下函式，由 route handler 直接 require 使用：
+
+| 函式 | 說明 |
+|------|------|
+| `generateCheckMacValue(params)` | 依規格產生 CheckMacValue（SHA-256） |
+| `verifyCheckMacValue(params)` | 驗證 CheckMacValue（timing-safe 比對） |
+| `buildFormParams(order, items, baseUrl)` | 組出送往 AIO Checkout 的完整表單參數 |
+| `queryTradeInfo(merchantTradeNo)` | 主動查詢綠界 QueryTradeInfo/V5 取得交易狀態 |
+| `IS_STAGING` | boolean，`true` 時使用測試環境端點 |
+
+### 端點
+
+| 方法 | 路徑 | 說明 |
+|------|------|------|
+| POST | `/api/orders/:id/ecpay-form` | 產生 AIO Checkout 表單參數（需 JWT） |
+| POST | `/ecpay/result` | OrderResultURL 回調（綠界導回，不需認證） |
+| POST | `/ecpay/notify` | ReturnURL dummy，固定回應 `1|OK` |
+
+### 請求與回應
+
+**POST /api/orders/:id/ecpay-form**
+
+無需 body，JWT 認證即可。
+
+成功回應（`200`）：
+```json
+{
+  "data": {
+    "action": "https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5",
+    "params": {
+      "MerchantID": "3002607",
+      "MerchantTradeNo": "EC1715000000000",
+      "MerchantTradeDate": "2026/05/12 10:00:00",
+      "PaymentType": "aio",
+      "TotalAmount": 3360,
+      "TradeDesc": "花卉電商購物",
+      "ItemName": "粉色玫瑰花束 x2",
+      "ReturnURL": "https://yourdomain/ecpay/notify",
+      "OrderResultURL": "https://yourdomain/ecpay/result",
+      "ClientBackURL": "https://yourdomain/orders/{id}?payment=cancel",
+      "ChoosePayment": "ALL",
+      "EncryptType": 1,
+      "CustomField1": "{order-uuid}",
+      "CheckMacValue": "..."
+    }
+  },
+  "error": null,
+  "message": ""
+}
+```
+
+**POST /ecpay/result（OrderResultURL）**
+
+由綠界以 Form POST 呼叫，帶入 `CustomField1`（order UUID）及 `MerchantTradeNo`。
+本站主動查詢 QueryTradeInfo 後，根據結果 redirect 至 `/orders/{id}?payment=success|failed|cancel`。
+
+### 環境變數
+
+| 變數 | 預設值（Staging） | 說明 |
+|------|-----------------|------|
+| `ECPAY_MERCHANT_ID` | `3002607` | 綠界商店代號 |
+| `ECPAY_HASH_KEY` | `pwFHCqoQZGmho4w6` | AES/SHA256 金鑰 |
+| `ECPAY_HASH_IV` | `EkRm7iFT261dpevs` | AES/SHA256 向量 |
+| `ECPAY_ENV` | `staging` | `staging` 或 `production` |
+| `BASE_URL` | `{req.protocol}://{req.host}` | 回調 URL 的 base，正式環境需設定 |
+
+### 錯誤情境
+
+| HTTP | error code | 情境 |
+|------|-----------|------|
+| 400 | INVALID_STATUS | 訂單狀態非 `pending`，無法送出付款 |
+| 401 | UNAUTHORIZED | 未提供 JWT |
+| 404 | NOT_FOUND | 訂單不存在或不屬於當前使用者 |
 
 ---
 

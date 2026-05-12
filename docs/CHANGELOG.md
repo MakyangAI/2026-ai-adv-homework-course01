@@ -1,5 +1,18 @@
 # CHANGELOG.md
 
+## [1.1.0] — 2026-05-12
+
+### 新增
+
+- 綠界 ECPay AIO 金流串接
+  - `src/ecpay.js`：核心模組（CheckMacValue 產生/驗證、AIO 表單參數組裝、QueryTradeInfo 主動查詢）
+  - `POST /api/orders/:id/ecpay-form`：產生 AIO Checkout 表單參數與 action URL（需 JWT，訂單須為 `pending`）
+  - `POST /ecpay/result`：OrderResultURL 回調，主動呼叫 QueryTradeInfo/V5 驗證交易結果，更新訂單狀態後重新導向訂單頁
+  - `POST /ecpay/notify`：ReturnURL dummy 端點，固定回應 `1|OK`
+  - 環境變數：`ECPAY_MERCHANT_ID`、`ECPAY_HASH_KEY`、`ECPAY_HASH_IV`、`ECPAY_ENV`（`staging` / `production`）、`BASE_URL`
+
+---
+
 ## [1.0.0] — 2026-05-07
 
 ### 新增
